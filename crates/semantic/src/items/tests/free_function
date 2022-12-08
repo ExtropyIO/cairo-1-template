@@ -1,0 +1,99 @@
+//! > Test free function param redefinition.
+
+//! > test_function_name
+test_function_diagnostics
+
+//! > function
+func foo(a: bool, a: felt) {
+}
+
+//! > function_name
+foo
+
+//! > module_code
+
+//! > expected_diagnostics
+error: Redefinition of parameter name "a" in function "test::foo".
+ --> lib.cairo:1:19
+func foo(a: bool, a: felt) {
+                  ^*****^
+
+//! > ==========================================================================
+
+//! > Test valid free function with implicit params.
+
+//! > test_function_name
+test_function_diagnostics
+
+//! > function
+func foo(a: bool) implicits(f: felt, b: bool) {
+}
+
+//! > function_name
+foo
+
+//! > module_code
+
+//! > expected_diagnostics
+
+//! > ==========================================================================
+
+//! > Test free function implicit param redefinition.
+
+//! > test_function_name
+test_function_diagnostics
+
+//! > function
+func foo() implicits(a: bool, a: felt) {
+}
+
+//! > function_name
+foo
+
+//! > module_code
+
+//! > expected_diagnostics
+error: Redefinition of parameter name "a" in function "test::foo".
+ --> lib.cairo:1:31
+func foo() implicits(a: bool, a: felt) {
+                              ^*****^
+
+//! > ==========================================================================
+
+//! > Test free function implicit param redefinition of param.
+
+//! > test_function_name
+test_function_diagnostics
+
+//! > function
+func foo(a: bool) implicits(a: felt) {
+}
+
+//! > function_name
+foo
+
+//! > module_code
+
+//! > expected_diagnostics
+error: Redefinition of parameter name "a" in function "test::foo".
+ --> lib.cairo:1:29
+func foo(a: bool) implicits(a: felt) {
+                            ^*****^
+
+//! > ==========================================================================
+
+//! > Test valid free function with unnamed parameters (both normal and implicit)
+
+//! > test_function_name
+test_function_diagnostics
+
+//! > function
+func foo(_: bool, a: bool, _: felt) implicits(_: bool, b: felt, _: felt) {
+}
+
+//! > function_name
+foo
+
+//! > module_code
+
+//! > expected_diagnostics
