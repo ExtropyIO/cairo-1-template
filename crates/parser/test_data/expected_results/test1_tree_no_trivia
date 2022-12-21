@@ -4,7 +4,7 @@
     │   │   ├── attributes (kind: AttributeList) []
     │   │   ├── module_kw (kind: TokenModule): 'mod'
     │   │   ├── name (kind: TokenIdentifier): 'submod'
-    │   │   └── semicolon (kind: TokenSemicolon): ';'
+    │   │   └── body (kind: TokenSemicolon): ';'
     │   ├── child #1 (kind: ItemUse)
     │   │   ├── attributes (kind: AttributeList) []
     │   │   ├── use_kw (kind: TokenUse): 'use'
@@ -303,7 +303,7 @@
     │   │       │   │   │   ├── path (kind: ExprPath)
     │   │       │   │   │   │   └── item #0 (kind: PathSegmentWithGenericArgs)
     │   │       │   │   │   │       ├── ident (kind: TokenIdentifier): 'func2'
-    │   │       │   │   │   │       ├── seperator (kind: TokenColonColon): '::'
+    │   │       │   │   │   │       ├── separator (kind: TokenColonColon): '::'
     │   │       │   │   │   │       └── generic_args (kind: GenericArgs)
     │   │       │   │   │   │           ├── langle (kind: TokenLT): '<'
     │   │       │   │   │   │           ├── generic_args (kind: GenericArgList)

@@ -131,6 +131,10 @@ impl HintProcessor for CairoHintProcessor {
             Hint::AllocDictFeltTo { .. } => todo!(),
             Hint::DictFeltToRead { .. } => todo!(),
             Hint::DictFeltToWrite { .. } => todo!(),
+            Hint::EnterScope => todo!(),
+            Hint::ExitScope => todo!(),
+            Hint::DictSquashHints { .. } => todo!(),
+            Hint::SystemCall { .. } => todo!(),
         };
         Ok(())
     }

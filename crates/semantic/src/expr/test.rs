@@ -5,9 +5,10 @@ use defs::ids::{ModuleItemId, VarId};
 use indoc::indoc;
 use num_bigint::ToBigInt;
 use pretty_assertions::assert_eq;
+use test_case::test_case;
 use utils::extract_matches;
 
-use crate::corelib::{core_felt_ty, unit_ty};
+use crate::corelib::{core_felt_ty, get_core_ty_by_name, unit_ty};
 use crate::db::SemanticGroup;
 use crate::expr::fmt::ExprFormatter;
 use crate::test_utils::{
@@ -25,6 +26,7 @@ semantic_test!(
         "src/expr/test_data/generics",
         "src/expr/test_data/if",
         "src/expr/test_data/let_statement",
+        "src/expr/test_data/literal",
         "src/expr/test_data/match",
         "src/expr/test_data/operators",
         "src/expr/test_data/pattern",
@@ -33,10 +35,19 @@ semantic_test!(
     test_function_diagnostics
 );
 
-#[test]
-fn test_expr_literal() {
+#[test_case("7", 7, "felt")]
+#[test_case("0x123", 0x123, "felt")]
+#[test_case("12_felt", 12, "felt")]
+#[test_case("16_u128", 16, "u128")]
+#[test_case("0x16_u128", 0x16, "u128")]
+#[test_case("'a'", 0x61, "felt")]
+#[test_case("'B'_u128", 0x42, "u128")]
+#[test_case("'hello world'_u128", 0x68656c6c6f20776f726c64, "u128")]
+#[test_case(r"'\''", 39, "felt")]
+#[test_case(r"'\x12\x34'_u128", 0x1234, "u128")]
+fn test_expr_literal(expr: &str, value: i128, ty_name: &str) {
     let mut db_val = SemanticDatabaseForTesting::default();
-    let test_expr = setup_test_expr(&mut db_val, "7", "", "").unwrap();
+    let test_expr = setup_test_expr(&mut db_val, expr, "", "").unwrap();
     let db = &db_val;
     let expr = db.expr_semantic(test_expr.function_id, test_expr.expr_id);
     let expr_formatter = ExprFormatter { db, free_function_id: test_expr.function_id };
@@ -45,15 +56,23 @@ fn test_expr_literal() {
     // Fix this.
     assert_eq!(
         format!("{:?}", expr.debug(&expr_formatter)),
-        "Literal(ExprLiteral { value: 7, ty: core::felt })"
+        format!(
+            "Literal(ExprLiteral {{ value: {}, ty: core::{} }})",
+            value,
+            match ty_name {
+                "felt" => "felt",
+                "u128" => "integer::u128",
+                _ => unreachable!(),
+            }
+        )
     );
 
     // Check expr.
     let semantic::ExprLiteral { value, ty, stable_ptr: _ } =
         extract_matches!(expr, crate::Expr::Literal, "Expected a literal.");
 
-    assert_eq!(value, 7.to_bigint().unwrap());
-    assert_eq!(ty, db.core_felt_ty());
+    assert_eq!(value, value.to_bigint().unwrap());
+    assert_eq!(ty, get_core_ty_by_name(db, ty_name.into(), vec![]));
 }
 
 #[test]
@@ -122,7 +141,7 @@ fn test_member_access() {
     .unwrap();
     let db = &db_val;
     let foo_id = extract_matches!(
-        db.module_item_by_name(module_id, "foo".into()).unwrap(),
+        db.module_item_by_name(module_id, "foo".into()).unwrap().unwrap(),
         ModuleItemId::FreeFunction
     );
     let expr_formatter = ExprFormatter { db, free_function_id: foo_id };
@@ -536,7 +555,7 @@ fn test_expr_call_failures() {
     assert_eq!(
         diagnostics,
         indoc! { "
-            error: Path not found.
+            error: Function not found.
              --> lib.cairo:2:1
             foo()
             ^*^
@@ -568,7 +587,7 @@ fn test_function_body() {
     )
     .unwrap();
     let db = &db_val;
-    let item_id = db.module_item_by_name(test_function.module_id, "foo".into()).unwrap();
+    let item_id = db.module_item_by_name(test_function.module_id, "foo".into()).unwrap().unwrap();
 
     let function_id = extract_matches!(item_id, ModuleItemId::FreeFunction);
     let body = db.free_function_definition_body(function_id).unwrap();

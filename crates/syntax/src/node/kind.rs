@@ -50,6 +50,7 @@ pub enum SyntaxKind {
     ModifierList,
     ParamList,
     ImplicitsClause,
+    ImplicitsList,
     OptionImplicitsClauseEmpty,
     OptionTerminalNoPanicEmpty,
     FunctionSignature,
@@ -59,6 +60,7 @@ pub enum SyntaxKind {
     Attribute,
     AttributeList,
     ItemModule,
+    ModuleBody,
     OptionAttributeArgsEmpty,
     AttributeArgs,
     AttributeArgList,
@@ -84,6 +86,8 @@ pub enum SyntaxKind {
     TerminalIdentifier,
     TokenLiteralNumber,
     TerminalLiteralNumber,
+    TokenShortString,
+    TerminalShortString,
     TokenFalse,
     TerminalFalse,
     TokenTrue,
@@ -156,6 +160,8 @@ pub enum SyntaxKind {
     TerminalMul,
     TokenDiv,
     TerminalDiv,
+    TokenMod,
+    TerminalMod,
     TokenColon,
     TerminalColon,
     TokenColonColon,
@@ -209,6 +215,7 @@ impl SyntaxKind {
             *self,
             SyntaxKind::TokenIdentifier
                 | SyntaxKind::TokenLiteralNumber
+                | SyntaxKind::TokenShortString
                 | SyntaxKind::TokenFalse
                 | SyntaxKind::TokenTrue
                 | SyntaxKind::TokenExtern
@@ -245,6 +252,7 @@ impl SyntaxKind {
                 | SyntaxKind::TokenMinus
                 | SyntaxKind::TokenMul
                 | SyntaxKind::TokenDiv
+                | SyntaxKind::TokenMod
                 | SyntaxKind::TokenColon
                 | SyntaxKind::TokenColonColon
                 | SyntaxKind::TokenComma
@@ -277,6 +285,7 @@ impl SyntaxKind {
             *self,
             SyntaxKind::TerminalIdentifier
                 | SyntaxKind::TerminalLiteralNumber
+                | SyntaxKind::TerminalShortString
                 | SyntaxKind::TerminalFalse
                 | SyntaxKind::TerminalTrue
                 | SyntaxKind::TerminalExtern
@@ -313,6 +322,7 @@ impl SyntaxKind {
                 | SyntaxKind::TerminalMinus
                 | SyntaxKind::TerminalMul
                 | SyntaxKind::TerminalDiv
+                | SyntaxKind::TerminalMod
                 | SyntaxKind::TerminalColon
                 | SyntaxKind::TerminalColonColon
                 | SyntaxKind::TerminalComma

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use db_utils::Upcast;
-use defs::db::{init_defs_group, DefsDatabase, DefsGroup, MacroPlugin};
+use defs::db::{init_defs_group, DefsDatabase, DefsGroup};
 use defs::ids::ModuleId;
+use defs::plugin::MacroPlugin;
 use filesystem::db::{init_files_group, AsFilesGroupMut, FilesDatabase, FilesGroup, FilesGroupEx};
 use filesystem::ids::{CrateLongId, Directory, FileLongId};
 use indoc::indoc;
@@ -79,10 +80,10 @@ fn set_file_content(db: &mut DatabaseForTesting, path: &str, content: &str) {
     vec![Arc::new(PanicablePlugin{})],
     indoc! {"
         #[panic_with(1, foo_improved)]
-        extern func foo(a: felt, b: other) -> Option::<()> implicits (rc: RangeCheck, gb: GasBuiltin) nopanic;
+        extern func foo(a: felt, b: other) -> Option::<()> implicits(RangeCheck, GasBuiltin) nopanic;
 
         #[panic_with(2, bar_changed)]
-        extern func bar() -> Option::<felt> nopanic;
+        extern func bar() -> Result::<felt, Err> nopanic;
 
         #[panic_with(3, non_extern_stuff)]
         func non_extern(_: some_type) -> Option::<(felt, other)> nopanic {
@@ -97,7 +98,7 @@ fn set_file_content(db: &mut DatabaseForTesting, path: &str, content: &str) {
                         v
                     },
                     Option::None (v) => {
-                        let data = array_new::<felt>();
+                        let mut data = array_new::<felt>();
                         array_append::<felt>(data, 1);
                         panic(data)
                     },
@@ -107,11 +108,11 @@ fn set_file_content(db: &mut DatabaseForTesting, path: &str, content: &str) {
         indoc! {"
             func bar_changed() -> felt {
                 match bar() {
-                    Option::Some (v) => {
+                    Result::Ok (v) => {
                         v
                     },
-                    Option::None (v) => {
-                        let data = array_new::<felt>();
+                    Result::Err (v) => {
+                        let mut data = array_new::<felt>();
                         array_append::<felt>(data, 2);
                         panic(data)
                     },
@@ -125,7 +126,7 @@ fn set_file_content(db: &mut DatabaseForTesting, path: &str, content: &str) {
                         v
                     },
                     Option::None (v) => {
-                        let data = array_new::<felt>();
+                        let mut data = array_new::<felt>();
                         array_append::<felt>(data, 3);
                         panic(data)
                     },

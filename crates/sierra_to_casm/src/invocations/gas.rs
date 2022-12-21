@@ -1,16 +1,19 @@
-use casm::ap_change::ApplyApChange;
-use casm::casm;
-use casm::operand::DerefOrImmediate;
-use itertools::chain;
-use num_bigint::ToBigInt;
-use sierra::extensions::felt::FeltOperator;
+use casm::builder::{CasmBuildResult, CasmBuilder};
+use casm::casm_build_extend;
+use casm::operand::{DerefOrImmediate, ResOperand};
+use num_bigint::BigInt;
+use sierra::extensions::builtin_cost::CostTokenType;
+use sierra::extensions::felt::FeltBinaryOperator;
 use sierra::extensions::gas::GasConcreteLibFunc;
-use sierra::program::{BranchInfo, BranchTarget};
+use sierra_ap_change::core_libfunc_ap_change;
 use utils::try_extract_matches;
 
-use super::{patch_jnz_to_end, CompiledInvocation, CompiledInvocationBuilder, InvocationError};
+use super::{CompiledInvocation, CompiledInvocationBuilder, InvocationError};
+use crate::invocations::get_non_fallthrough_statement_id;
 use crate::references::{BinOpExpression, CellExpression, ReferenceExpression, ReferenceValue};
 use crate::relocations::{Relocation, RelocationEntry};
+
+pub const STEP_COST: i64 = 100;
 
 /// Builds instructions for Sierra gas operations.
 pub fn build(
@@ -20,7 +23,6 @@ pub fn build(
     match libfunc {
         GasConcreteLibFunc::GetGas(_) => build_get_gas(builder),
         GasConcreteLibFunc::RefundGas(_) => build_refund_gas(builder),
-        GasConcreteLibFunc::BurnGas(_) => Ok(builder.build_only_reference_changes([].into_iter())),
     }
 }
 
@@ -28,19 +30,22 @@ pub fn build(
 fn build_get_gas(
     builder: CompiledInvocationBuilder<'_>,
 ) -> Result<CompiledInvocation, InvocationError> {
-    // TODO(orizi): Add Range-Check usage.
     let requested_count = builder
         .program_info
         .metadata
         .gas_info
         .variable_values
-        .get(&builder.idx)
-        .ok_or(InvocationError::UnknownVariableData)?;
-    let (range_check_expression, gas_counter_expression) = match builder.refs {
+        .get(&(builder.idx, CostTokenType::Step))
+        .ok_or(InvocationError::UnknownVariableData)?
+        * STEP_COST;
+    let (range_check, gas_counter_value) = match builder.refs {
         [
             ReferenceValue { expression: range_check_expression, .. },
             ReferenceValue { expression: gas_counter_expression, .. },
-        ] => (range_check_expression, gas_counter_expression),
+        ] => (
+            range_check_expression.try_unpack_single()?.to_buffer(1)?,
+            gas_counter_expression.try_unpack_single()?.to_deref()?,
+        ),
         refs => {
             return Err(InvocationError::WrongNumberOfArguments {
                 expected: 2,
@@ -48,78 +53,61 @@ fn build_get_gas(
             });
         }
     };
-    let gas_counter_value = try_extract_matches!(
-        gas_counter_expression
-            .try_unpack_single()
-            .map_err(|_| InvocationError::InvalidReferenceExpressionForArgument)?,
-        CellExpression::Deref
-    )
-    .ok_or(InvocationError::InvalidReferenceExpressionForArgument)?;
-    let range_check = try_extract_matches!(
-        range_check_expression
-            .try_unpack_single()
-            .map_err(|_| InvocationError::InvalidReferenceExpressionForArgument)?,
-        CellExpression::Deref
-    )
-    .ok_or(InvocationError::InvalidReferenceExpressionForArgument)?;
 
-    let failure_handle_statement_id = match builder.invocation.branches.as_slice() {
-        [
-            BranchInfo { target: BranchTarget::Fallthrough, .. },
-            BranchInfo { target: BranchTarget::Statement(statement_id), .. },
-        ] => statement_id,
-        _ => panic!("malformed invocation"),
+    let failure_handle_statement_id = get_non_fallthrough_statement_id(&builder);
+
+    let mut casm_builder = CasmBuilder::default();
+    let range_check = casm_builder.add_var(range_check);
+    let gas_counter = casm_builder.add_var(ResOperand::Deref(gas_counter_value));
+    let gas_counter_fix =
+        casm_builder.add_var(ResOperand::Immediate(BigInt::from(u128::MAX) + 1 - requested_count));
+    let requested_count = casm_builder.add_var(ResOperand::Immediate(requested_count.into()));
+
+    casm_build_extend! {casm_builder,
+        tempvar has_enough_gas;
+        hint TestLessThanOrEqual {lhs: requested_count, rhs: gas_counter} into {dst: has_enough_gas};
+        jump HasEnoughGas if has_enough_gas != 0;
+        tempvar gas_diff;
+        assert gas_diff = gas_counter + gas_counter_fix;
+        assert *(range_check++) = gas_diff;
+        jump Failure;
+        HasEnoughGas:
+        tempvar updated_gas;
+        assert gas_counter = updated_gas + requested_count;
+        assert *(range_check++) = updated_gas;
     };
 
-    // The code up to the success branch.
-    let mut before_success_branch = casm! {
-        %{ memory[ap + 0] = ((*requested_count - 1) as i128) < memory gas_counter_value %}
-        jmp rel 0 if [ap + 0] != 0, ap++;
-
-        // requested_count - 1 >= gas_counter_value => requested_count > gas_counter:
-        // TODO(orizi): Make into one command when wider constants are supported.
-        [ap + 0] = (gas_counter_value.unchecked_apply_known_ap_change(1)) + (1 - *requested_count as i128), ap++;
-        [ap + 0] = [ap - 1] * (-1), ap++;
-        [ap - 1] = [[range_check.unchecked_apply_known_ap_change(3)]];
-
-        jmp rel 0; // Fixed in relocations.
-    };
-    patch_jnz_to_end(&mut before_success_branch, 0);
-    let relocation_index = before_success_branch.instructions.len() - 1;
-    let success_branch = casm! {
-       // requested_count - 1 < gas_counter_value => requested_count <= gas_counter:
-       [ap + 0] = (gas_counter_value.unchecked_apply_known_ap_change(1)) + (-requested_count as i128), ap++;
-       [ap - 1] = [[range_check.unchecked_apply_known_ap_change(2)]];
-    };
-
+    let CasmBuildResult { instructions, awaiting_relocations, label_state, fallthrough_state } =
+        casm_builder.build();
+    // TODO(orizi): Extract the assertion out of the libfunc implementation.
+    assert_eq!(
+        core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+        [fallthrough_state.ap_change, label_state["Failure"].ap_change]
+            .map(sierra_ap_change::ApChange::Known)
+    );
+    let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
     Ok(builder.build(
-        chain!(before_success_branch.instructions, success_branch.instructions).collect(),
+        instructions,
         vec![RelocationEntry {
-            instruction_idx: relocation_index,
-            relocation: Relocation::RelativeStatementId(*failure_handle_statement_id),
+            instruction_idx: *relocation_index,
+            relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
         }],
         [
             vec![
-                ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                    op: FeltOperator::Add,
-                    a: range_check.unchecked_apply_known_ap_change(2),
-                    b: DerefOrImmediate::from(1),
-                })),
-                ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                    op: FeltOperator::Sub,
-                    a: gas_counter_value.unchecked_apply_known_ap_change(2),
-                    b: DerefOrImmediate::Immediate(requested_count.to_bigint().unwrap()),
-                })),
+                ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                    fallthrough_state.get_adjusted(range_check),
+                )),
+                ReferenceExpression::from_cell(CellExpression::Deref(
+                    fallthrough_state.get_adjusted_as_cell_ref(updated_gas),
+                )),
             ]
             .into_iter(),
             vec![
-                ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                    op: FeltOperator::Add,
-                    a: range_check.unchecked_apply_known_ap_change(3),
-                    b: DerefOrImmediate::from(1),
-                })),
+                ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                    label_state["Failure"].get_adjusted(range_check),
+                )),
                 ReferenceExpression::from_cell(CellExpression::Deref(
-                    gas_counter_value.unchecked_apply_known_ap_change(3),
+                    label_state["Failure"].get_adjusted_as_cell_ref(gas_counter),
                 )),
             ]
             .into_iter(),
@@ -137,7 +125,7 @@ fn build_refund_gas(
         .metadata
         .gas_info
         .variable_values
-        .get(&builder.idx)
+        .get(&(builder.idx, CostTokenType::Step))
         .ok_or(InvocationError::UnknownVariableData)?;
     let expression = match builder.refs {
         [ReferenceValue { expression, .. }] => expression,
@@ -161,9 +149,9 @@ fn build_refund_gas(
             ReferenceExpression::from_cell(CellExpression::Deref(gas_counter_value))
         } else {
             ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                op: FeltOperator::Add,
+                op: FeltBinaryOperator::Add,
                 a: gas_counter_value,
-                b: DerefOrImmediate::Immediate(requested_count.to_bigint().unwrap()),
+                b: DerefOrImmediate::Immediate(BigInt::from(*requested_count)),
             }))
         }]
         .into_iter(),
