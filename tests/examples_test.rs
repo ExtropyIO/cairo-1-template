@@ -19,7 +19,7 @@ fn setup(name: &str) -> (RootDatabase, Vec<CrateId>) {
     let dir = env!("CARGO_MANIFEST_DIR");
     // Pop the "/tests" suffix.
     let mut path = PathBuf::from(dir).parent().unwrap().to_owned();
-    path.push("examples");
+    path.push("src");
     path.push(format!("{name}.cairo"));
 
     let mut db = RootDatabase::default();
@@ -33,7 +33,7 @@ fn get_test_data_path(name: &str, test_type: &str) -> PathBuf {
     [env!("CARGO_MANIFEST_DIR"), "test_data", &format!("{name}.{test_type}")].into_iter().collect()
 }
 
-/// Compares content to examples content, or overides it if `CAIRO_FIX_TESTS=1`.
+/// Compares content to src content, or overides it if `CAIRO_FIX_TESTS=1`.
 fn compare_contents_or_fix(name: &str, test_type: &str, content: String) {
     let path = get_test_data_path(name, test_type);
     compare_contents_or_fix_with_path(&path, content)
