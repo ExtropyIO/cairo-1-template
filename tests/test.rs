@@ -117,6 +117,12 @@ fn lowering_test(name: &str) {
 }
 
 #[test_case(
+    "add_one",
+    &[41].map(BigInt::from) =>
+    RunResultValue::Success(vec![BigInt::from(42)]);
+    "add_one"
+)]
+#[test_case(
     "fib",
     &[1, 1, 7].map(BigInt::from) =>
     RunResultValue::Success(vec![BigInt::from(21)]);
