@@ -28,5 +28,5 @@ salsa.workspace = true
 test-case.workspace = true
 
 [[test]]
-name = "examples_test"
-path = "examples_test.rs"
+name = "test"
+path = "test.rs"
