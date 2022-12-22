@@ -16,7 +16,7 @@ use defs::ids::{
     FreeFunctionLongId, ImplLongId, LanguageElementId, LookupItemId, ModuleFileId, ModuleItemId,
     StructLongId, TraitLongId, UseLongId,
 };
-use diagnostics::{DiagnosticEntry, Diagnostics};
+use diagnostics::{DiagnosticEntry, Diagnostics, ToOption};
 use filesystem::db::{AsFilesGroupMut, FilesGroup, FilesGroupEx, PrivRawFileContentQuery};
 use filesystem::ids::{FileId, FileLongId};
 use filesystem::span::TextPosition;
@@ -289,7 +289,7 @@ impl LanguageServer for Backend {
         let db = self.db().await;
         let file_uri = params.text_document.uri;
         let file = self.file(&db, file_uri.clone());
-        let syntax = if let Some(syntax) = db.file_syntax(file) {
+        let syntax = if let Ok(syntax) = db.file_syntax(file) {
             syntax
         } else {
             eprintln!("Semantic analysis failed. File '{file_uri}' does not exist.");
@@ -306,7 +306,7 @@ impl LanguageServer for Backend {
         let db = self.db().await;
         let file_uri = params.text_document.uri;
         let file = self.file(&db, file_uri.clone());
-        let syntax = if let Some(syntax) = db.file_syntax(file) {
+        let syntax = if let Ok(syntax) = db.file_syntax(file) {
             syntax
         } else {
             eprintln!("Formatting failed. File '{file_uri}' does not exist.");
@@ -413,7 +413,7 @@ impl LanguageServer for Backend {
                 ),
             };
 
-            let file = if let Some(files) = db.module_files(module_id) {
+            let file = if let Ok(files) = db.module_files(module_id) {
                 files[file_index.0]
             } else {
                 return Ok(None);
@@ -424,7 +424,7 @@ impl LanguageServer for Backend {
             } else {
                 return Ok(None);
             };
-            let syntax = if let Some(syntax) = db.file_syntax(file) {
+            let syntax = if let Ok(syntax) = db.file_syntax(file) {
                 syntax
             } else {
                 eprintln!("Formatting failed. File '{file_uri}' does not exist.");
@@ -516,7 +516,7 @@ fn get_node_and_lookup_items(
     let filename = file.file_name(db.upcast());
 
     // Get syntax for file.
-    let syntax = db.file_syntax(file).on_none(|| {
+    let syntax = db.file_syntax(file).to_option().on_none(|| {
         eprintln!("Formatting failed. File '{filename}' does not exist.");
     })?;
 
@@ -601,8 +601,10 @@ fn get_expr_hint(
     }
     let expr_node = ast::Expr::from_syntax_node(syntax_db, node);
     // Lookup semantic expression.
-    let expr_id =
-        db.lookup_expr_by_ptr(free_function_id, expr_node.stable_ptr()).on_none(|| {
+    let expr_id = db
+        .lookup_expr_by_ptr(free_function_id, expr_node.stable_ptr())
+        .to_option()
+        .on_none(|| {
             eprintln!("Hover failed. Semantic model not found for expression.");
         })?;
     let semantic_expr = db.expr_semantic(free_function_id, expr_id);

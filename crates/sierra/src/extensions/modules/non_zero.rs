@@ -1,11 +1,12 @@
-use super::as_single_type;
 use crate::extensions::lib_func::{
     LibFuncSignature, OutputVarInfo, SierraApChange, SignatureOnlyGenericLibFunc,
     SignatureSpecializationContext,
 };
 use crate::extensions::type_specialization_context::TypeSpecializationContext;
 use crate::extensions::types::TypeInfo;
-use crate::extensions::{ConcreteType, NamedType, OutputVarReferenceInfo, SpecializationError};
+use crate::extensions::{
+    args_as_single_type, ConcreteType, NamedType, OutputVarReferenceInfo, SpecializationError,
+};
 use crate::ids::{ConcreteTypeId, GenericLibFuncId, GenericTypeId};
 use crate::program::GenericArg;
 
@@ -21,7 +22,7 @@ impl NamedType for NonZeroType {
         context: &dyn TypeSpecializationContext,
         args: &[GenericArg],
     ) -> Result<Self::Concrete, SpecializationError> {
-        let ty = as_single_type(args)?;
+        let ty = args_as_single_type(args)?;
         Ok(NonZeroConcreteType { info: context.get_type_info(ty.clone())?, ty })
     }
 }
@@ -46,14 +47,14 @@ impl SignatureOnlyGenericLibFunc for UnwrapNonZeroLibFunc {
         context: &dyn SignatureSpecializationContext,
         args: &[GenericArg],
     ) -> Result<LibFuncSignature, SpecializationError> {
-        let ty = as_single_type(args)?;
+        let ty = args_as_single_type(args)?;
         Ok(LibFuncSignature::new_non_branch(
             vec![context.get_wrapped_concrete_type(NonZeroType::id(), ty.clone())?],
             vec![OutputVarInfo {
                 ty,
                 ref_info: OutputVarReferenceInfo::SameAsParam { param_idx: 0 },
             }],
-            SierraApChange::Known(0),
+            SierraApChange::Known { new_vars_only: true },
         ))
     }
 }

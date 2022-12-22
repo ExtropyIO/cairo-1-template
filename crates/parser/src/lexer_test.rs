@@ -15,7 +15,15 @@ fn terminal_kind_to_text(kind: SyntaxKind) -> Vec<&'static str> {
     match kind {
         SyntaxKind::TerminalIdentifier => vec!["abc", "_az12f", "A90g5__"],
         SyntaxKind::TerminalLiteralNumber => {
-            vec!["0", "9", "00", "1234567890123456789012345678901234567890"]
+            vec![
+                "0",
+                "0xA2",
+                "9",
+                "00",
+                "1234567890123456789012345678901234567890",
+                "11_u128",
+                "0xA2_u128",
+            ]
         }
         SyntaxKind::TerminalFalse => vec!["false"],
         SyntaxKind::TerminalExtern => vec!["extern"],
@@ -43,6 +51,7 @@ fn terminal_kind_to_text(kind: SyntaxKind) -> Vec<&'static str> {
         SyntaxKind::TerminalColonColon => vec!["::"],
         SyntaxKind::TerminalComma => vec![","],
         SyntaxKind::TerminalDiv => vec!["/"],
+        SyntaxKind::TerminalMod => vec!["%"],
         SyntaxKind::TerminalDot => vec!["."],
         SyntaxKind::TerminalDotDot => vec![".."],
         SyntaxKind::TerminalEq => vec!["="],
@@ -116,6 +125,7 @@ fn terminal_kinds() -> Vec<SyntaxKind> {
         SyntaxKind::TerminalMinus,
         SyntaxKind::TerminalMul,
         SyntaxKind::TerminalDiv,
+        SyntaxKind::TerminalMod,
         SyntaxKind::TerminalColon,
         SyntaxKind::TerminalColonColon,
         SyntaxKind::TerminalComma,
@@ -152,7 +162,7 @@ fn need_separator(
     {
         return true;
     }
-    if kind0 == SyntaxKind::TerminalLiteralNumber && kind0 == kind1 {
+    if kind0 == SyntaxKind::TerminalLiteralNumber && (kind0 == kind1 || is_identifier_like(kind1)) {
         return true;
     }
     if (text0 == "&" && text1.starts_with('&'))

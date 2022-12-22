@@ -1,29 +1,30 @@
 use assert_matches::assert_matches;
 use casm::ap_change::ApChange;
-use casm::inline::CasmContext;
-use casm::instructions::{Instruction, InstructionBody};
-use casm::operand::{CellRef, DerefOrImmediate, Register};
+use casm::instructions::Instruction;
+use casm::operand::{CellRef, Register};
 use itertools::zip_eq;
-use num_bigint::BigInt;
+use sierra::extensions::builtin_cost::CostTokenType;
 use sierra::extensions::core::CoreConcreteLibFunc;
-use sierra::extensions::lib_func::{BranchSignature, SierraApChange};
+use sierra::extensions::lib_func::BranchSignature;
 use sierra::extensions::{ConcreteLibFunc, OutputVarReferenceInfo};
 use sierra::ids::ConcreteTypeId;
 use sierra::program::{BranchInfo, BranchTarget, Invocation, StatementIdx};
-use sierra_gas::CostTokenType;
+use sierra_ap_change::core_libfunc_ap_change::core_libfunc_ap_change;
 use thiserror::Error;
-use utils::extract_matches;
+use utils::ordered_hash_map::OrderedHashMap;
 use {casm, sierra};
 
 use crate::environment::frame_state::{FrameState, FrameStateError};
 use crate::environment::Environment;
 use crate::metadata::Metadata;
-use crate::references::{try_unpack_deref, CellExpression, ReferenceExpression, ReferenceValue};
+use crate::references::{CellExpression, ReferenceExpression, ReferenceValue};
 use crate::relocations::RelocationEntry;
 use crate::type_sizes::TypeSizeMap;
 
 mod array;
+mod boolean;
 mod boxing;
+mod builtin_cost;
 mod dict_felt_to;
 mod enm;
 mod felt;
@@ -32,6 +33,8 @@ mod gas;
 mod mem;
 mod misc;
 mod pedersen;
+mod starknet;
+
 mod strct;
 mod uint128;
 
@@ -55,6 +58,8 @@ pub enum InvocationError {
     #[error("Expected variable data for statement not found.")]
     UnknownVariableData,
     #[error("An integer overflow occurred.")]
+    InvalidGenericArg,
+    #[error("Invalid generic argument for libfunc.")]
     IntegerOverflow,
     #[error(transparent)]
     FrameStateError(#[from] FrameStateError),
@@ -70,12 +75,12 @@ pub struct BranchChanges {
     /// The change to AP caused by the libfunc in the branch.
     pub ap_change: ApChange,
     /// The change to the remaing gas value in the wallet.
-    pub gas_change: i64,
+    pub gas_change: OrderedHashMap<CostTokenType, i64>,
 }
 impl BranchChanges {
     fn new(
         ap_change: ApChange,
-        gas_change: i64,
+        gas_change: OrderedHashMap<CostTokenType, i64>,
         expressions: impl Iterator<Item = ReferenceExpression>,
         branch_signature: &BranchSignature,
     ) -> Self {
@@ -171,24 +176,49 @@ impl CompiledInvocationBuilder<'_> {
             relocations,
             results: zip_eq(
                 zip_eq(self.libfunc.branch_signatures(), gas_changes),
-                output_expressions,
+                zip_eq(output_expressions, core_libfunc_ap_change(self.libfunc)),
             )
-            .map(|((branch_signature, gas_change), expressions)| {
-                let ap_change = match branch_signature.ap_change {
-                    SierraApChange::Known(x) => ApChange::Known(x),
-                    SierraApChange::NotImplemented => panic!("AP change not implemented."),
-                    SierraApChange::FinalizeLocals => match self.environment.frame_state {
-                        FrameState::Finalized { allocated } => ApChange::Known(allocated),
-                        _ => panic!("Unexpected frame state."),
-                    },
-                    SierraApChange::Unknown => ApChange::Unknown,
+            .map(|((branch_signature, gas_change), (expressions, ap_change))| {
+                let ap_change = match ap_change {
+                    sierra_ap_change::ApChange::Known(x) => ApChange::Known(x),
+                    sierra_ap_change::ApChange::AtLocalsFinalizationByTypeSize(_) => {
+                        ApChange::Known(0)
+                    }
+                    sierra_ap_change::ApChange::FinalizeLocals => {
+                        match self.environment.frame_state {
+                            FrameState::Finalized { allocated } => ApChange::Known(allocated),
+                            _ => panic!("Unexpected frame state."),
+                        }
+                    }
+                    sierra_ap_change::ApChange::KnownByTypeSize(ty) => {
+                        ApChange::Known(self.program_info.type_sizes[&ty] as usize)
+                    }
+                    sierra_ap_change::ApChange::FunctionCall(id) => self
+                        .program_info
+                        .metadata
+                        .ap_change_info
+                        .function_ap_change
+                        .get(&id)
+                        .map_or(ApChange::Unknown, |x| ApChange::Known(x + 2)),
+                    sierra_ap_change::ApChange::FromMetadata => ApChange::Known(
+                        *self
+                            .program_info
+                            .metadata
+                            .ap_change_info
+                            .variable_values
+                            .get(&self.idx)
+                            .unwrap_or(&0),
+                    ),
+                    sierra_ap_change::ApChange::Unknown => ApChange::Unknown,
                 };
-                // TODO(lior): Instead of taking only the steps, take all token types into account.
-                let gas_change_steps = gas_change.map(|x| x[CostTokenType::Step]);
 
                 BranchChanges::new(
                     ap_change,
-                    -gas_change_steps.unwrap_or(0),
+                    gas_change
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|(token_type, val)| (*token_type, -val))
+                        .collect(),
                     expressions,
                     branch_signature,
                 )
@@ -228,8 +258,11 @@ pub fn compile_invocation(
     match libfunc {
         // TODO(ilya, 10/10/2022): Handle type.
         CoreConcreteLibFunc::Felt(libfunc) => felt::build(libfunc, builder),
+        CoreConcreteLibFunc::Bitwise(_) => panic!("Not implemented."),
+        CoreConcreteLibFunc::Bool(libfunc) => boolean::build(libfunc, builder),
         CoreConcreteLibFunc::Uint128(libfunc) => uint128::build(libfunc, builder),
         CoreConcreteLibFunc::Gas(libfunc) => gas::build(libfunc, builder),
+        CoreConcreteLibFunc::BranchAlign(_) => misc::build_branch_align(builder),
         CoreConcreteLibFunc::Array(libfunc) => array::build(libfunc, builder),
         CoreConcreteLibFunc::Drop(_) => misc::build_drop(builder),
         CoreConcreteLibFunc::Dup(_) => misc::build_dup(builder),
@@ -243,6 +276,8 @@ pub fn compile_invocation(
         CoreConcreteLibFunc::Struct(libfunc) => strct::build(libfunc, builder),
         CoreConcreteLibFunc::DictFeltTo(libfunc) => dict_felt_to::build(libfunc, builder),
         CoreConcreteLibFunc::Pedersen(libfunc) => pedersen::build(libfunc, builder),
+        CoreConcreteLibFunc::BuiltinCost(libfunc) => builtin_cost::build(libfunc, builder),
+        CoreConcreteLibFunc::StarkNet(libfunc) => starknet::build(libfunc, builder),
     }
 }
 
@@ -262,30 +297,9 @@ trait ReferenceExpressionView: Sized {
     fn to_reference_expression(self) -> ReferenceExpression;
 }
 
-// Utility for boolean functions.
-pub fn unwrap_range_check_based_binary_op_refs(
-    builder: &CompiledInvocationBuilder<'_>,
-) -> Result<(CellRef, CellRef, CellRef), InvocationError> {
-    // Fetches, verifies and returns the range check, a and b references.
-    match builder.refs {
-        [
-            ReferenceValue { expression: range_check_expression, .. },
-            ReferenceValue { expression: expr_a, .. },
-            ReferenceValue { expression: expr_b, .. },
-        ] => Ok((
-            try_unpack_deref(range_check_expression)?,
-            try_unpack_deref(expr_a)?,
-            try_unpack_deref(expr_b)?,
-        )),
-        refs => Err(InvocationError::WrongNumberOfArguments { expected: 3, actual: refs.len() }),
-    }
-}
-
-// Utility for boolean functions.
-pub fn get_bool_comparison_target_statement_id(
-    builder: &CompiledInvocationBuilder<'_>,
-) -> StatementIdx {
-    // Fetch the jump target.
+/// Fetches the non-fallthrough jump target of the invocation, assuming this invocation is a
+/// conditional jump.
+pub fn get_non_fallthrough_statement_id(builder: &CompiledInvocationBuilder<'_>) -> StatementIdx {
     match builder.invocation.branches.as_slice() {
         [
             BranchInfo { target: BranchTarget::Fallthrough, .. },
@@ -293,22 +307,4 @@ pub fn get_bool_comparison_target_statement_id(
         ] => *target_statement_id,
         _ => panic!("malformed invocation"),
     }
-}
-
-/// Patches the jnz statement target to the end of the CASM context.
-fn patch_jnz_to_end(context: &mut CasmContext, instruction_idx: usize) {
-    // Compute the offset.
-    let mut offset = context.current_code_offset;
-    for i in 0..instruction_idx {
-        offset -= context.instructions[i].body.op_size();
-    }
-    // Replace the jmp target.
-    *extract_matches!(
-        &mut extract_matches!(
-            &mut context.instructions[instruction_idx].body,
-            InstructionBody::Jnz
-        )
-        .jump_offset,
-        DerefOrImmediate::Immediate
-    ) = BigInt::from(offset);
 }

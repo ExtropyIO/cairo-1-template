@@ -2,7 +2,10 @@ use casm::casm;
 use sierra::program::{BranchInfo, BranchTarget};
 use utils::try_extract_matches;
 
-use super::{CompiledInvocation, CompiledInvocationBuilder, InvocationError};
+use super::{
+    get_non_fallthrough_statement_id, CompiledInvocation, CompiledInvocationBuilder,
+    InvocationError,
+};
 use crate::references::{CellExpression, ReferenceExpression, ReferenceValue};
 use crate::relocations::{Relocation, RelocationEntry};
 
@@ -65,19 +68,13 @@ pub fn build_jump_nz(
     )
     .ok_or(InvocationError::InvalidReferenceExpressionForArgument)?;
 
-    let target_statement_id = match builder.invocation.branches.as_slice() {
-        [
-            BranchInfo { target: BranchTarget::Fallthrough, .. },
-            BranchInfo { target: BranchTarget::Statement(statement_id), .. },
-        ] => statement_id,
-        _ => panic!("malformed invocation"),
-    };
+    let target_statement_id = get_non_fallthrough_statement_id(&builder);
 
     Ok(builder.build(
         casm! { jmp rel 0 if value != 0; }.instructions,
         vec![RelocationEntry {
             instruction_idx: 0,
-            relocation: Relocation::RelativeStatementId(*target_statement_id),
+            relocation: Relocation::RelativeStatementId(target_statement_id),
         }],
         [
             vec![].into_iter(),
@@ -112,4 +109,22 @@ pub fn build_identity(
 ) -> Result<CompiledInvocation, InvocationError> {
     let outputs = builder.refs.iter().map(|r| r.expression.clone());
     Ok(builder.build_only_reference_changes(outputs))
+}
+
+pub fn build_branch_align(
+    builder: CompiledInvocationBuilder<'_>,
+) -> Result<CompiledInvocation, InvocationError> {
+    let ap_fix = builder
+        .program_info
+        .metadata
+        .ap_change_info
+        .variable_values
+        .get(&builder.idx)
+        .copied()
+        .unwrap_or(0);
+    Ok(builder.build(
+        if ap_fix > 0 { casm! {ap += ap_fix;}.instructions } else { vec![] },
+        vec![],
+        [vec![].into_iter()].into_iter(),
+    ))
 }

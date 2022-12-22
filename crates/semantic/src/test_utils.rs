@@ -6,6 +6,7 @@ use defs::ids::{FreeFunctionId, GenericFunctionId, ModuleId};
 use filesystem::db::{init_files_group, AsFilesGroupMut, FilesDatabase, FilesGroup, FilesGroupEx};
 use filesystem::ids::{CrateId, CrateLongId, Directory};
 use parser::db::ParserDatabase;
+use plugins::get_default_plugins;
 use pretty_assertions::assert_eq;
 use syntax::node::db::{SyntaxDatabase, SyntaxGroup};
 use utils::ordered_hash_map::OrderedHashMap;
@@ -24,6 +25,7 @@ impl Default for SemanticDatabaseForTesting {
         let mut res = Self { storage: Default::default() };
         init_files_group(&mut res);
         init_defs_group(&mut res);
+        res.set_macro_plugins(get_default_plugins());
         res
     }
 }
@@ -133,6 +135,7 @@ pub fn setup_test_function(
     let (test_module, diagnostics) = setup_test_module(db, &content).split();
     let generic_function_id = db
         .module_item_by_name(test_module.module_id, function_name.into())
+        .expect("Failed to load module")
         .and_then(GenericFunctionId::option_from)
         .unwrap_or_else(|| panic!("Function {function_name} was not found."));
     let function_id = extract_matches!(generic_function_id, GenericFunctionId::Free);
@@ -243,6 +246,6 @@ pub fn test_function_diagnostics(
 #[macro_export]
 macro_rules! semantic_test {
     ($test_name:ident, $filenames:expr, $func:ident) => {
-        utils::test_file_test!($test_name, $filenames, SemanticDatabaseForTesting, $func);
+        test_utils::test_file_test!($test_name, $filenames, SemanticDatabaseForTesting, $func);
     };
 }

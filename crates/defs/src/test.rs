@@ -10,10 +10,12 @@ use syntax::node::db::{SyntaxDatabase, SyntaxGroup};
 use syntax::node::{ast, Terminal, TypedSyntaxNode};
 use utils::extract_matches;
 
-use crate::db::{
-    init_defs_group, DefsDatabase, DefsGroup, MacroPlugin, PluginDiagnostic, PluginResult,
-};
+use crate::db::{init_defs_group, DefsDatabase, DefsGroup};
 use crate::ids::{ModuleId, ModuleItemId};
+use crate::plugin::{
+    DynDiagnosticMapper, MacroPlugin, PluginDiagnostic, PluginGeneratedFile, PluginResult,
+    TrivialMapper,
+};
 
 #[salsa::database(DefsDatabase, ParserDatabase, SyntaxDatabase, FilesDatabase)]
 pub struct DatabaseForTesting {
@@ -74,14 +76,14 @@ fn test_resolve() {
         "},
     );
     let db = &db_val;
-    assert!(db.module_item_by_name(module_id, "doesnt_exist".into()).is_none());
-    let felt_add = db.module_item_by_name(module_id, "felt_add".into());
+    assert!(db.module_item_by_name(module_id, "doesnt_exist".into()).unwrap().is_none());
+    let felt_add = db.module_item_by_name(module_id, "felt_add".into()).unwrap();
     assert_eq!(format!("{:?}", felt_add.debug(db)), "Some(ExternFunctionId(test::felt_add))");
-    match db.module_item_by_name(module_id, "felt_add".into()).unwrap() {
+    match db.module_item_by_name(module_id, "felt_add".into()).unwrap().unwrap() {
         crate::ids::ModuleItemId::ExternFunction(_) => {}
         _ => panic!("Expected an extern function"),
     };
-    match db.module_item_by_name(module_id, "foo".into()).unwrap() {
+    match db.module_item_by_name(module_id, "foo".into()).unwrap().unwrap() {
         crate::ids::ModuleItemId::FreeFunction(_) => {}
         _ => panic!("Expected a free function"),
     };
@@ -98,7 +100,7 @@ fn test_module_file() {
     );
     let db = &db_val;
     let item_id = extract_matches!(
-        db.module_item_by_name(module_id, "mysubmodule".into()).unwrap(),
+        db.module_item_by_name(module_id, "mysubmodule".into()).unwrap().unwrap(),
         ModuleItemId::Submodule
     );
     let submodule_id = ModuleId::Submodule(item_id);
@@ -141,6 +143,7 @@ fn test_submodules() {
     );
 
     db.module_item_by_name(subsubmodule_id, "foo".into())
+        .unwrap()
         .expect("Expected to find foo() in subsubmodule.");
 
     // Test file mappings.
@@ -166,14 +169,19 @@ impl MacroPlugin for DummyPlugin {
     ) -> PluginResult {
         match item_ast {
             ast::Item::Struct(struct_ast) => PluginResult {
-                code: Some((
-                    "virt".into(),
-                    format!("func foo(x:{}){{}}", struct_ast.name(db).text(db)),
-                )),
+                code: Some(PluginGeneratedFile {
+                    name: "virt".into(),
+                    content: format!("func foo(x:{}){{}}", struct_ast.name(db).text(db)),
+                    diagnostic_mapper: DynDiagnosticMapper::new(TrivialMapper {}),
+                }),
                 diagnostics: vec![],
             },
             ast::Item::FreeFunction(item) => PluginResult {
-                code: Some(("virt2".into(), "extern type B;".into())),
+                code: Some(PluginGeneratedFile {
+                    name: "virt2".into(),
+                    content: "extern type B;".into(),
+                    diagnostic_mapper: DynDiagnosticMapper::new(TrivialMapper {}),
+                }),
                 diagnostics: vec![PluginDiagnostic {
                     stable_ptr: item.stable_ptr().untyped(),
                     message: "bla".into(),
@@ -201,12 +209,12 @@ fn test_plugin() {
     let module_id = ModuleId::CrateRoot(crate_id);
 
     assert_eq!(
-        format!("{:?}", db.module_item_by_name(module_id, "foo".into()).debug(db)),
+        format!("{:?}", db.module_item_by_name(module_id, "foo".into()).unwrap().debug(db)),
         "Some(FreeFunctionId(test::foo))"
     );
 
     assert_eq!(
-        format!("{:?}", db.module_item_by_name(module_id, "B".into()).debug(db)),
+        format!("{:?}", db.module_item_by_name(module_id, "B".into()).unwrap().debug(db)),
         "Some(ExternTypeId(test::B))"
     );
 }

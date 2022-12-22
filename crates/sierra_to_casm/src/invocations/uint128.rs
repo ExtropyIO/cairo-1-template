@@ -1,29 +1,23 @@
-use casm::ap_change::ApplyApChange;
-use casm::casm;
-use casm::operand::{ap_cell_ref, DerefOrImmediate};
-use itertools::chain;
+use casm::builder::{CasmBuildResult, CasmBuilder};
+use casm::casm_build_extend;
+use casm::operand::{CellRef, ResOperand};
 use num_bigint::BigInt;
-use sierra::extensions::felt::FeltOperator;
-use sierra::extensions::integer::{
+use sierra::extensions::uint128::{
     IntOperator, Uint128BinaryOperationConcreteLibFunc, Uint128Concrete,
     Uint128OperationConcreteLibFunc, Uint128OperationWithConstConcreteLibFunc,
 };
+use sierra_ap_change::core_libfunc_ap_change;
 
 use super::{misc, CompiledInvocation, CompiledInvocationBuilder, InvocationError};
-use crate::invocations::{
-    get_bool_comparison_target_statement_id, patch_jnz_to_end,
-    unwrap_range_check_based_binary_op_refs,
-};
-use crate::references::{
-    try_unpack_deref, BinOpExpression, CellExpression, ReferenceExpression, ReferenceValue,
-};
+use crate::invocations::get_non_fallthrough_statement_id;
+use crate::references::{CellExpression, ReferenceExpression, ReferenceValue};
 use crate::relocations::{Relocation, RelocationEntry};
 
 #[cfg(test)]
 #[path = "uint128_test.rs"]
 mod test;
 
-/// Builds instructions for Sierra uint128 operations.
+/// Builds instructions for Sierra u128 operations.
 pub fn build(
     libfunc: &Uint128Concrete,
     builder: CompiledInvocationBuilder<'_>,
@@ -31,7 +25,7 @@ pub fn build(
     match libfunc {
         Uint128Concrete::Operation(Uint128OperationConcreteLibFunc::Binary(
             Uint128BinaryOperationConcreteLibFunc { operator, .. },
-        )) => build_uint128_op(builder, *operator),
+        )) => build_u128_op(builder, *operator),
         Uint128Concrete::Operation(Uint128OperationConcreteLibFunc::Const(
             Uint128OperationWithConstConcreteLibFunc { operator: _, c: _, .. },
         )) => Err(InvocationError::NotImplemented(builder.invocation.clone())),
@@ -40,83 +34,145 @@ pub fn build(
             [ReferenceExpression::from_cell(CellExpression::Immediate(BigInt::from(libfunc.c)))]
                 .into_iter(),
         )),
-        Uint128Concrete::FromFelt(_) => build_uint128_from_felt(builder),
+        Uint128Concrete::FromFelt(_) => build_u128_from_felt(builder),
         Uint128Concrete::ToFelt(_) => misc::build_identity(builder),
-        Uint128Concrete::LessThan(_) => build_uint128_lt(builder),
-        Uint128Concrete::LessThanOrEqual(_) => build_uint128_le(builder),
+        Uint128Concrete::LessThan(_) => build_u128_lt(builder),
+        Uint128Concrete::Equal(_) => build_u128_eq(builder),
+        Uint128Concrete::LessThanOrEqual(_) => build_u128_le(builder),
     }
 }
 
-/// Handles a uint128 operation with the given op.
-fn build_uint128_op(
+/// Fetches, verifies and returns the range check, a and b references.
+pub fn unwrap_range_check_based_binary_op_refs(
+    builder: &CompiledInvocationBuilder<'_>,
+) -> Result<(ResOperand, CellRef, CellRef), InvocationError> {
+    match builder.refs {
+        [
+            ReferenceValue { expression: range_check_expression, .. },
+            ReferenceValue { expression: expr_a, .. },
+            ReferenceValue { expression: expr_b, .. },
+        ] => Ok((
+            range_check_expression.try_unpack_single()?.to_buffer(0)?,
+            expr_a.try_unpack_single()?.to_deref()?,
+            expr_b.try_unpack_single()?.to_deref()?,
+        )),
+
+        refs => Err(InvocationError::WrongNumberOfArguments { expected: 3, actual: refs.len() }),
+    }
+}
+
+/// Handles a u128 operation with the given op.
+fn build_u128_op(
     builder: CompiledInvocationBuilder<'_>,
     op: IntOperator,
 ) -> Result<CompiledInvocation, InvocationError> {
     let (range_check, a, b) = unwrap_range_check_based_binary_op_refs(&builder)?;
     match op {
-        IntOperator::Add | IntOperator::Sub => {
-            let failure_handle_statement_id = get_bool_comparison_target_statement_id(&builder);
-            let uint128_limit: BigInt = BigInt::from(u128::MAX) + 1;
-            // The code up to the success branch.
-            let mut before_success_branch = match op {
-                IntOperator::Add => casm! {
-                    [ap + 0] = a + b, ap++;
-                    %{ memory[ap + 0] = memory [ap - 1] < (uint128_limit.clone()) %}
-                    jmp rel 0 if [ap + 0] != 0, ap++;
-                    // Overflow:
-                    // Here we know that 2**128 <= a + b < 2 * (2**128 - 1).
-                    [ap + 0] = [ap - 2] + (-uint128_limit), ap++;
-                    [ap - 1] = [[range_check.unchecked_apply_known_ap_change(3)]];
-                    jmp rel 0; // Fixed in relocations.
-                },
-                IntOperator::Sub => casm! {
-                    a = [ap + 0] + b, ap++;
-                    %{ memory[ap + 0] = memory [ap - 1] < (uint128_limit.clone())  %}
-                    jmp rel 0 if [ap + 0] != 0, ap++;
-                    // Underflow:
-                    // Here we know that 0 - (2**128 - 1) <= a - b < 0.
-                    [ap + 0] = [ap - 2] + uint128_limit, ap++;
-                    [ap - 1] = [[range_check.unchecked_apply_known_ap_change(3)]];
-                    jmp rel 0; // Fixed in relocations.
-                },
+        IntOperator::OverflowingAdd | IntOperator::OverflowingSub => {
+            let failure_handle_statement_id = get_non_fallthrough_statement_id(&builder);
+            let mut casm_builder = CasmBuilder::default();
+            let u128_limit =
+                casm_builder.add_var(ResOperand::Immediate(BigInt::from(u128::MAX) + 1));
+            let range_check = casm_builder.add_var(range_check);
+            let a = casm_builder.add_var(ResOperand::Deref(a));
+            let b = casm_builder.add_var(ResOperand::Deref(b));
+            let (possible_overflow, overflow_fixed) = match op {
+                IntOperator::OverflowingAdd => {
+                    casm_build_extend! {casm_builder,
+                        tempvar no_overflow;
+                        tempvar a_plus_b;
+                        assert a_plus_b = a + b;
+                        hint TestLessThan {lhs: a_plus_b, rhs: u128_limit} into {dst: no_overflow};
+                        jump NoOverflow if no_overflow != 0;
+                        // Overflow:
+                        // Here we know that 2**128 <= a + b < 2 * (2**128 - 1).
+                        tempvar wrapping_a_plus_b;
+                        assert a_plus_b = wrapping_a_plus_b + u128_limit;
+                    };
+                    (a_plus_b, wrapping_a_plus_b)
+                }
+                IntOperator::OverflowingSub => {
+                    casm_build_extend! {casm_builder,
+                        tempvar no_overflow;
+                        tempvar a_minus_b;
+                        assert a = a_minus_b + b;
+                        hint TestLessThan {lhs: a_minus_b, rhs: u128_limit} into {dst: no_overflow};
+                        jump NoOverflow if no_overflow != 0;
+                        // Underflow:
+                        // Here we know that 0 - (2**128 - 1) <= a - b < 0.
+                        tempvar wrapping_a_minus_b;
+                        assert wrapping_a_minus_b = a_minus_b + u128_limit;
+                    };
+                    (a_minus_b, wrapping_a_minus_b)
+                }
                 _ => unreachable!("Only supported options in arm."),
             };
-            patch_jnz_to_end(&mut before_success_branch, 1);
-            let relocation_index = before_success_branch.instructions.len() - 1;
-            let success_branch = casm! {
-                // No overflow:
-                [ap - 2] = [[range_check.unchecked_apply_known_ap_change(2)]];
+            casm_build_extend! {casm_builder,
+                    assert *(range_check++) = overflow_fixed;
+                    jump Target;
+                NoOverflow:
+                    assert *(range_check++) = possible_overflow;
             };
-
+            let CasmBuildResult {
+                instructions,
+                awaiting_relocations,
+                label_state,
+                fallthrough_state,
+            } = casm_builder.build();
+            // TODO(orizi): Extract the assertion out of the libfunc implementation.
+            assert_eq!(
+                core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+                [fallthrough_state.ap_change, label_state["Target"].ap_change]
+                    .map(sierra_ap_change::ApChange::Known)
+            );
+            let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
             Ok(builder.build(
-                chain!(before_success_branch.instructions, success_branch.instructions).collect(),
+                instructions,
                 vec![RelocationEntry {
-                    instruction_idx: relocation_index,
+                    instruction_idx: *relocation_index,
                     relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
                 }],
                 [
                     vec![
-                        ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                            op: FeltOperator::Add,
-                            a: range_check.unchecked_apply_known_ap_change(2),
-                            b: DerefOrImmediate::from(1),
-                        })),
-                        ReferenceExpression::from_cell(CellExpression::Deref(ap_cell_ref(-2))),
+                        ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                            fallthrough_state.get_adjusted(range_check),
+                        )),
+                        ReferenceExpression::from_cell(CellExpression::Deref(
+                            fallthrough_state.get_adjusted_as_cell_ref(possible_overflow),
+                        )),
                     ]
                     .into_iter(),
-                    vec![ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                        op: FeltOperator::Add,
-                        a: range_check.unchecked_apply_known_ap_change(3),
-                        b: DerefOrImmediate::from(1),
-                    }))]
+                    vec![
+                        ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                            label_state["Target"].get_adjusted(range_check),
+                        )),
+                        ReferenceExpression::from_cell(CellExpression::Deref(
+                            label_state["Target"].get_adjusted_as_cell_ref(overflow_fixed),
+                        )),
+                    ]
                     .into_iter(),
                 ]
                 .into_iter(),
             ))
         }
         IntOperator::DivMod => {
-            let code = casm! {
-                %{ (memory[ap + 0], memory[ap + 1]) = divmod(a, b) %}
+            let mut casm_builder = CasmBuilder::default();
+            let u128_bound_minus_u64_bound = casm_builder
+                .add_var(ResOperand::Immediate(BigInt::from(u128::MAX) - BigInt::from(u64::MAX)));
+            let u64_bound = casm_builder.add_var(ResOperand::Immediate(BigInt::from(u64::MAX) + 1));
+            let one = casm_builder.add_var(ResOperand::Immediate(BigInt::from(1)));
+            let range_check = casm_builder.add_var(range_check);
+            let a = casm_builder.add_var(ResOperand::Deref(a));
+            let b = casm_builder.add_var(ResOperand::Deref(b));
+            casm_build_extend! {casm_builder,
+                tempvar r_plus_1;
+                tempvar b_minus_r_minus_1;
+                tempvar q_is_small;
+                tempvar b_or_q_bound_rc_value;
+                tempvar bq;
+                tempvar q;
+                tempvar r;
+                hint DivMod { lhs: a, rhs: b } into { quotient: q, remainder: r };
                 // Both `q` and `r` must be uint128.
                 // We must check `r` explicitly: we later check that `0 <= b - (r + 1)` and
                 // `b * q + r = a`, however, if `r = -1` we may pass both of these checks (say, if
@@ -125,58 +181,88 @@ fn build_uint128_op(
                 // `b * q + r = a`, and if `b = 2`, `a = 1` and `r = 0`, we can take `q` to be the
                 // inverse of 2 (`(PRIME + 1) / 2`, much larger than 2^128) and pass this
                 // constraint.
-                [ap + 0] = [[range_check]], ap++;
-                [ap + 0] = [[range_check.unchecked_apply_known_ap_change(1)] + 1], ap++;
+                assert *(range_check++) = q;
+                assert *(range_check++) = r;
                 // Verify `r < b` by constraining `0 <= b - (r + 1)`.
-                [ap + 0] = [ap + -1] + 1, ap++;
-                (b.unchecked_apply_known_ap_change(3)) = [ap + 0] + [ap + -1], ap++;
-                [ap + -1] = [[range_check.unchecked_apply_known_ap_change(4)] + 2], ap++;
+                assert r_plus_1 = r + one;
+                assert b = b_minus_r_minus_1 + r_plus_1;
+                assert *(range_check++) = b_minus_r_minus_1;
                 // Verify `b * q + r = a`.
-                [ap + -1] = [ap + -5] * (b.unchecked_apply_known_ap_change(5));
-                (a.unchecked_apply_known_ap_change(5)) = [ap + -1] + [ap + -4];
+                // Since both `b` and `q` can be 2^128-1, we may overflow on `b * q`. To verify this
+                // is not the case, use the fact that `b * q` must be less than 2^128. We know
+                // `min(b, q)` must be less than 2^64. We guess which is less and verify.
+                hint TestLessThan {lhs: q, rhs: u64_bound} into {dst: q_is_small};
+                jump QIsSmall if q_is_small != 0;
+                // `q >= 2^64`, so to verify `b < 2^64` we assert `2^128 - 2^64 + b` is in the range
+                // check bound.
+                assert b_or_q_bound_rc_value = b + u128_bound_minus_u64_bound;
+                jump VerifyBQ;
+                QIsSmall:
+                // `q < 2^64`, compute `2^64 - q`.
+                assert b_or_q_bound_rc_value = q + u128_bound_minus_u64_bound;
+                VerifyBQ:
+                // Now, b_or_q_bound_rc_value contains either `2^128 - 2^64 + q` or
+                // `2^128 - 2^64 + b`. Verify this value is in [0, 2^128).
+                assert *(range_check++) = b_or_q_bound_rc_value;
+                // Range validations done; verify `b * q + r = a` and that's it.
+                assert bq = b * q;
+                assert a = bq + r;
             };
+
+            let CasmBuildResult {
+                instructions,
+                awaiting_relocations,
+                label_state: _,
+                fallthrough_state,
+            } = casm_builder.build();
+            // TODO(orizi): Extract the assertion out of the libfunc implementation.
+            assert_eq!(
+                core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+                [fallthrough_state.ap_change].map(sierra_ap_change::ApChange::Known)
+            );
+
+            assert!(
+                awaiting_relocations.is_empty(),
+                "Malformed casm builder usage (no non-fallthrough branch in divmod)."
+            );
+
             Ok(builder.build(
-                code.instructions,
+                instructions,
                 vec![],
                 vec![
                     vec![
-                        ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                            op: FeltOperator::Add,
-                            a: range_check.unchecked_apply_known_ap_change(5),
-                            b: DerefOrImmediate::from(3),
-                        })),
-                        ReferenceExpression::from_cell(CellExpression::Deref(ap_cell_ref(-5))),
-                        ReferenceExpression::from_cell(CellExpression::Deref(ap_cell_ref(-4))),
+                        ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                            fallthrough_state.get_adjusted(range_check),
+                        )),
+                        ReferenceExpression::from_cell(CellExpression::Deref(
+                            fallthrough_state.get_adjusted_as_cell_ref(q),
+                        )),
+                        ReferenceExpression::from_cell(CellExpression::Deref(
+                            fallthrough_state.get_adjusted_as_cell_ref(r),
+                        )),
                     ]
                     .into_iter(),
                 ]
                 .into_iter(),
             ))
         }
-        IntOperator::Mul
-        | IntOperator::Div
-        | IntOperator::Mod
-        | IntOperator::WrappingAdd
-        | IntOperator::WrappingSub
-        | IntOperator::WrappingMul => {
+        IntOperator::OverflowingMul => {
             Err(InvocationError::NotImplemented(builder.invocation.clone()))
         }
     }
 }
 
-/// Handles a casting a felt into uint128.
-fn build_uint128_from_felt(
+/// Handles a casting a felt into u128.
+fn build_u128_from_felt(
     builder: CompiledInvocationBuilder<'_>,
 ) -> Result<CompiledInvocation, InvocationError> {
-    let (range_check, value_cell) = match builder.refs {
+    let (range_check, value) = match builder.refs {
         [
             ReferenceValue { expression: range_check_expression, .. },
             ReferenceValue { expression: expr_value, .. },
         ] => (
-            try_unpack_deref(range_check_expression)?,
-            expr_value
-                .try_unpack_single()
-                .map_err(|_| InvocationError::InvalidReferenceExpressionForArgument)?,
+            range_check_expression.try_unpack_single()?.to_buffer(3)?,
+            expr_value.try_unpack_single()?.to_deref()?,
         ),
         refs => {
             return Err(InvocationError::WrongNumberOfArguments {
@@ -185,196 +271,252 @@ fn build_uint128_from_felt(
             });
         }
     };
-    let failure_handle_statement_id = get_bool_comparison_target_statement_id(&builder);
-    let uint128_limit: BigInt = BigInt::from(u128::MAX) + 1;
-    match value_cell {
-        CellExpression::Deref(value) => {
-            // The code up to the success branch.
-            let mut before_success_branch = casm! {
-                %{ memory[ap + 0] = memory value < (uint128_limit.clone()) %}
-                jmp rel 0 if [ap + 0] != 0, ap++; // Jump to success branch. Address updated later.
-                // Overflow:
-                %{ (memory[ap + 0], memory[ap + 1]) = divmod(
-                    memory (range_check.unchecked_apply_known_ap_change(1)),
-                    (uint128_limit.clone())
-                ) %}
-                ap += 2;
-                [ap + 0] = [ap - 2] * uint128_limit, ap++;
-                (value.unchecked_apply_known_ap_change(3)) = [ap - 1] + [ap - 2];
-                [ap - 1] = [ap + 0] + 1, ap++;
-                // Range checking that: q > 0 && q < uint128_limit && r < uint128_limit.
-                [ap - 1] = [[(range_check.unchecked_apply_known_ap_change(5))]];
-                [ap - 2] = [[(range_check.unchecked_apply_known_ap_change(5))] + 1];
-                [ap - 3] = [[(range_check.unchecked_apply_known_ap_change(5))] + 2];
-                jmp rel 0; // Fixed in relocations.
-            };
-            patch_jnz_to_end(&mut before_success_branch, 0);
-            let relocation_index = before_success_branch.instructions.len() - 1;
-            let success_branch = casm! {
-                // No overflow:
-                value = [[(range_check.unchecked_apply_known_ap_change(1))]];
-            };
-
-            Ok(builder.build(
-                chain!(before_success_branch.instructions, success_branch.instructions).collect(),
-                vec![RelocationEntry {
-                    instruction_idx: relocation_index,
-                    relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
-                }],
-                [
-                    vec![
-                        ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                            op: FeltOperator::Add,
-                            a: range_check.unchecked_apply_known_ap_change(1),
-                            b: DerefOrImmediate::Immediate(BigInt::from(1)),
-                        })),
-                        ReferenceExpression::from_cell(CellExpression::Deref(
-                            value.unchecked_apply_known_ap_change(1),
-                        )),
-                    ]
-                    .into_iter(),
-                    vec![ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                        op: FeltOperator::Add,
-                        a: range_check.unchecked_apply_known_ap_change(5),
-                        b: DerefOrImmediate::Immediate(BigInt::from(2)),
-                    }))]
-                    .into_iter(),
-                ]
-                .into_iter(),
-            ))
-        }
-        CellExpression::Immediate(value) => {
-            let output_expressions = [
-                vec![
-                    ReferenceExpression::from_cell(CellExpression::Deref(
-                        range_check.unchecked_apply_known_ap_change(1),
-                    )),
-                    ReferenceExpression::from_cell(CellExpression::Immediate(value.clone())),
-                ]
-                .into_iter(),
-                vec![ReferenceExpression::from_cell(CellExpression::Deref(
-                    range_check.unchecked_apply_known_ap_change(4),
-                ))]
-                .into_iter(),
-            ]
-            .into_iter();
-
-            Ok(if value >= BigInt::from(0) && value < uint128_limit {
-                builder.build(casm! { ap += 1; }.instructions, vec![], output_expressions)
-            } else {
-                builder.build(
-                    casm! { ap += 4; jmp rel 0; }.instructions,
-                    vec![RelocationEntry {
-                        instruction_idx: 0,
-                        relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
-                    }],
-                    output_expressions,
-                )
-            })
-        }
-        _ => Err(InvocationError::InvalidReferenceExpressionForArgument),
-    }
-}
-
-fn build_uint128_lt(
-    builder: CompiledInvocationBuilder<'_>,
-) -> Result<CompiledInvocation, InvocationError> {
-    let (range_check, a, b) = unwrap_range_check_based_binary_op_refs(&builder)?;
-    let target_statement_id = get_bool_comparison_target_statement_id(&builder);
-
-    // Split the code into two blocks, to get the offset of the first block as the jump target in
-    // case `a >= b`.
-    let mut jnz_and_lt_code = casm! {
-        // Check if `a >= b`.
-        %{ memory[ap + 0] = memory b <= memory a %}
-        jmp rel 0 if [ap + 0] != 0, ap++;
-        // `a < b` <===> `b - a - 1 >= 0`.
-        [ap + 0] = (a.unchecked_apply_known_ap_change(1)) + 1, ap++; // Compute `a + 1`.
-        // Compute `b - a - 1`.
-        (b.unchecked_apply_known_ap_change(2)) = [ap + 0] + [ap + -1], ap++;
-        [ap - 1] = [[range_check.unchecked_apply_known_ap_change(3)]];
-        jmp rel 0; // Fixed in relocations.
+    let failure_handle_statement_id = get_non_fallthrough_statement_id(&builder);
+    let u128_bound: BigInt = BigInt::from(u128::MAX) + 1; // = 2**128.
+    // Represent the maximal possible value (PRIME - 1) as 2**128 * max_x + max_y.
+    let max_x: i128 = 10633823966279327296825105735305134080;
+    let max_y: i128 = 0;
+    let mut casm_builder = CasmBuilder::default();
+    // Defining params and constants.
+    let range_check = casm_builder.add_var(range_check);
+    let value = casm_builder.add_var(ResOperand::Deref(value));
+    let u128_limit = casm_builder.add_var(ResOperand::Immediate(u128_bound.clone()));
+    let le_max_y_fix = casm_builder.add_var(ResOperand::Immediate(u128_bound.clone() - max_y - 1));
+    let lt_max_x_fix = casm_builder.add_var(ResOperand::Immediate(u128_bound - max_x));
+    let minus_max_x = casm_builder.add_var(ResOperand::Immediate(BigInt::from(-max_x)));
+    casm_build_extend! {casm_builder,
+            tempvar is_u128;
+            hint TestLessThan { lhs: value, rhs: u128_limit } into { dst: is_u128 };
+            jump NoOverflow if is_u128 != 0;
+            // Allocating all values required so that `x` and `y` would be last.
+            tempvar x_2_128;
+            tempvar x_minus_max_x;
+            tempvar rced_value;
+            tempvar x;
+            tempvar y;
+            // Write value as 2**128 * x + y.
+            hint DivMod { lhs: value, rhs: u128_limit } into { quotient: x, remainder: y };
+            // Check x in [0, 2**128).
+            assert *(range_check++) = x;
+            // Check y in [0, 2**128).
+            assert *(range_check++) = y;
+            // Check that value = 2**128 * x + y (mod PRIME).
+            assert x_2_128 = x * u128_limit;
+            assert value = x_2_128 + y;
+            // Check that there is no overflow in the computation of 2**128 * x + y.
+            // Start by checking if x==max_x.
+            assert x_minus_max_x = x + minus_max_x;
+            jump XNotMaxX if x_minus_max_x != 0;
+            // If x == max_x, check that y <= max_y.
+            assert rced_value = y + le_max_y_fix;
+            jump WriteRcedValue;
+        XNotMaxX:
+            // If x != max_x, check that x < max_x.
+            assert rced_value = x + lt_max_x_fix;
+        WriteRcedValue:
+            // In both cases, range-check the calculated value.
+            assert *(range_check++) = rced_value;
+            // If x != 0, jump to the end.
+            jump FailureHandle if x != 0;
+        InfiniteLoop:
+            // Otherwise, start an infinite loop.
+            jump InfiniteLoop;
+        NoOverflow:
+            assert *(range_check++) = value;
     };
-    let ge_code = casm! {
-        // `a >= b` <===> `a - b >= 0`.
-        // Compute `a - b`.
-        (a.unchecked_apply_known_ap_change(1)) = [ap + 0] + (b.unchecked_apply_known_ap_change(1)),
-            ap++;
-        [ap - 1] = [[range_check.unchecked_apply_known_ap_change(2)]];
-    };
-
-    // Since the jump offset of the positive (X<Y) case depends only on the above CASM code,
-    // compute it here and manually replace the value in the `jmp`.
-    // The target should be just after the `jmp rel 0` statement, which ends the X>=Y case.
-    patch_jnz_to_end(&mut jnz_and_lt_code, 0);
-
-    let relocation_index = jnz_and_lt_code.instructions.len() - 1;
+    let CasmBuildResult { instructions, awaiting_relocations, label_state, fallthrough_state } =
+        casm_builder.build();
+    // TODO(orizi): Extract the assertion out of the libfunc implementation.
+    assert_eq!(
+        core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+        [fallthrough_state.ap_change, label_state["FailureHandle"].ap_change]
+            .map(sierra_ap_change::ApChange::Known)
+    );
+    let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
     Ok(builder.build(
-        chain!(jnz_and_lt_code.instructions, ge_code.instructions).collect(),
+        instructions,
         vec![RelocationEntry {
-            instruction_idx: relocation_index,
-            relocation: Relocation::RelativeStatementId(target_statement_id),
+            instruction_idx: *relocation_index,
+            relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
         }],
-        [2, 3]
-            .map(|ap_change| {
-                vec![ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                    op: FeltOperator::Add,
-                    a: range_check.unchecked_apply_known_ap_change(ap_change),
-                    b: DerefOrImmediate::from(1),
-                }))]
-                .into_iter()
-            })
+        [
+            vec![
+                ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                    fallthrough_state.get_adjusted(range_check),
+                )),
+                ReferenceExpression::from_cell(CellExpression::Deref(
+                    fallthrough_state.get_adjusted_as_cell_ref(value),
+                )),
+            ]
             .into_iter(),
+            vec![
+                ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                    label_state["FailureHandle"].get_adjusted(range_check),
+                )),
+                ReferenceExpression::from_cell(CellExpression::Deref(
+                    label_state["FailureHandle"].get_adjusted_as_cell_ref(x),
+                )),
+                ReferenceExpression::from_cell(CellExpression::Deref(
+                    label_state["FailureHandle"].get_adjusted_as_cell_ref(y),
+                )),
+            ]
+            .into_iter(),
+        ]
+        .into_iter(),
     ))
 }
 
-fn build_uint128_le(
+fn build_u128_lt(
     builder: CompiledInvocationBuilder<'_>,
 ) -> Result<CompiledInvocation, InvocationError> {
     let (range_check, a, b) = unwrap_range_check_based_binary_op_refs(&builder)?;
-    let target_statement_id = get_bool_comparison_target_statement_id(&builder);
-
-    // Split the code into two blocks, to get the offset of the first block as the jump target in
-    // case `a > b`.
-    let mut jnz_and_le_code = casm! {
-        // Check if `a > b`.
-        %{ memory[ap + 0] = memory b < memory a %}
-        jmp rel 0 if [ap + 0] != 0, ap++;
-        // `a <= b` <===> `b - a >= 0`.
-        // Compute `b - a`.
-        (b.unchecked_apply_known_ap_change(1)) = [ap + 0] + (a.unchecked_apply_known_ap_change(1)),
-            ap++;
-        [ap - 1] = [[range_check.unchecked_apply_known_ap_change(2)]];
-        jmp rel 0; // Fixed in relocations.
+    let failure_handle_statement_id = get_non_fallthrough_statement_id(&builder);
+    let mut casm_builder = CasmBuilder::default();
+    let u128_limit = casm_builder.add_var(ResOperand::Immediate(BigInt::from(u128::MAX) + 1));
+    let range_check = casm_builder.add_var(range_check);
+    let a = casm_builder.add_var(ResOperand::Deref(a));
+    let b = casm_builder.add_var(ResOperand::Deref(b));
+    casm_build_extend! {casm_builder,
+            tempvar a_ge_b;
+            tempvar a_minus_b;
+            assert a = a_minus_b + b;
+            hint TestLessThan {lhs: a_minus_b, rhs: u128_limit} into {dst: a_ge_b};
+            jump False if a_ge_b != 0;
+            tempvar wrapping_a_minus_b;
+            assert wrapping_a_minus_b = a_minus_b + u128_limit;
+            assert *(range_check++) = wrapping_a_minus_b;
+            jump True;
+        False:
+            assert *(range_check++) = a_minus_b;
     };
-    let gt_code = casm! {
-        // `a > b` <===> `a - b - 1 >= 0`.
-        [ap + 0] = (b.unchecked_apply_known_ap_change(1)) + 1, ap++; // Compute `b + 1`.
-        (a.unchecked_apply_known_ap_change(2)) = [ap + 0] + [ap - 1], ap++; // Compute `a - b - 1`.
-        [ap - 1] = [[range_check.unchecked_apply_known_ap_change(3)]];
-    };
-
-    // Since the jump offset of the positive (X<Y) case depends only on the above CASM code,
-    // compute it here and manually replace the value in the `jmp`.
-    // The target should be just after the `jmp rel 0` statement, which ends the X>=Y case.
-    patch_jnz_to_end(&mut jnz_and_le_code, 0);
-
-    let relocation_index = jnz_and_le_code.instructions.len() - 1;
+    let CasmBuildResult { instructions, awaiting_relocations, label_state, fallthrough_state } =
+        casm_builder.build();
+    // TODO(orizi): Extract the assertion out of the libfunc implementation.
+    assert_eq!(
+        core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+        [fallthrough_state.ap_change, label_state["True"].ap_change]
+            .map(sierra_ap_change::ApChange::Known)
+    );
+    let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
     Ok(builder.build(
-        chain!(jnz_and_le_code.instructions, gt_code.instructions).collect(),
+        instructions,
         vec![RelocationEntry {
-            instruction_idx: relocation_index,
+            instruction_idx: *relocation_index,
+            relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
+        }],
+        [
+            vec![ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                fallthrough_state.get_adjusted(range_check),
+            ))]
+            .into_iter(),
+            vec![ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                label_state["True"].get_adjusted(range_check),
+            ))]
+            .into_iter(),
+        ]
+        .into_iter(),
+    ))
+}
+
+fn build_u128_le(
+    builder: CompiledInvocationBuilder<'_>,
+) -> Result<CompiledInvocation, InvocationError> {
+    let (range_check, a, b) = unwrap_range_check_based_binary_op_refs(&builder)?;
+    let failure_handle_statement_id = get_non_fallthrough_statement_id(&builder);
+    let mut casm_builder = CasmBuilder::default();
+    let u128_limit = casm_builder.add_var(ResOperand::Immediate(BigInt::from(u128::MAX) + 1));
+    let range_check = casm_builder.add_var(range_check);
+    let a = casm_builder.add_var(ResOperand::Deref(a));
+    let b = casm_builder.add_var(ResOperand::Deref(b));
+    casm_build_extend! {casm_builder,
+            tempvar a_gt_b;
+            tempvar b_minus_a;
+            assert b = b_minus_a + a;
+            hint TestLessThanOrEqual {lhs: u128_limit, rhs: b_minus_a} into {dst: a_gt_b};
+            jump False if a_gt_b != 0;
+            assert *(range_check++) = b_minus_a;
+            jump True;
+        False:
+            tempvar wrapping_a_minus_b;
+            assert wrapping_a_minus_b = b_minus_a + u128_limit;
+            assert *(range_check++) = wrapping_a_minus_b;
+    };
+    let CasmBuildResult { instructions, awaiting_relocations, label_state, fallthrough_state } =
+        casm_builder.build();
+    // TODO(orizi): Extract the assertion out of the libfunc implementation.
+    assert_eq!(
+        core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+        [fallthrough_state.ap_change, label_state["True"].ap_change]
+            .map(sierra_ap_change::ApChange::Known)
+    );
+    let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
+    Ok(builder.build(
+        instructions,
+        vec![RelocationEntry {
+            instruction_idx: *relocation_index,
+            relocation: Relocation::RelativeStatementId(failure_handle_statement_id),
+        }],
+        [
+            vec![ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                fallthrough_state.get_adjusted(range_check),
+            ))]
+            .into_iter(),
+            vec![ReferenceExpression::from_cell(CellExpression::from_res_operand(
+                label_state["True"].get_adjusted(range_check),
+            ))]
+            .into_iter(),
+        ]
+        .into_iter(),
+    ))
+}
+
+// Handle u128 equality check.
+fn build_u128_eq(
+    builder: CompiledInvocationBuilder<'_>,
+) -> Result<CompiledInvocation, InvocationError> {
+    let (a, b) = match builder.refs {
+        [ReferenceValue { expression: expr_a, .. }, ReferenceValue { expression: expr_b, .. }] => {
+            (expr_a.try_unpack_single()?.to_deref()?, expr_b.try_unpack_single()?.to_deref()?)
+        }
+        refs => {
+            return Err(InvocationError::WrongNumberOfArguments {
+                expected: 2,
+                actual: refs.len(),
+            });
+        }
+    };
+
+    // The target line to jump to if a != b.
+    let target_statement_id = get_non_fallthrough_statement_id(&builder);
+
+    let mut casm_builder = CasmBuilder::default();
+    let a = casm_builder.add_var(ResOperand::Deref(a));
+    let b = casm_builder.add_var(ResOperand::Deref(b));
+    casm_build_extend! {casm_builder,
+            // diff = a - b => (diff == 0) <==> (a == b)
+            tempvar diff;
+            assert a = diff + b;
+
+            jump NotEqual if diff != 0;
+            jump Equal;
+        NotEqual:
+    };
+    let CasmBuildResult { instructions, awaiting_relocations, fallthrough_state, label_state } =
+        casm_builder.build();
+
+    // TODO(orizi): Extract the assertion out of the libfunc implementation.
+    assert_eq!(
+        core_libfunc_ap_change::core_libfunc_ap_change(builder.libfunc),
+        [fallthrough_state.ap_change, label_state["Equal"].ap_change]
+            .map(sierra_ap_change::ApChange::Known)
+    );
+    let [relocation_index] = &awaiting_relocations[..] else { panic!("Malformed casm builder usage.") };
+    Ok(builder.build(
+        instructions,
+        vec![RelocationEntry {
+            instruction_idx: *relocation_index,
             relocation: Relocation::RelativeStatementId(target_statement_id),
         }],
-        [3, 2]
-            .map(|ap_change| {
-                vec![ReferenceExpression::from_cell(CellExpression::BinOp(BinOpExpression {
-                    op: FeltOperator::Add,
-                    a: range_check.unchecked_apply_known_ap_change(ap_change),
-                    b: DerefOrImmediate::from(1),
-                }))]
-                .into_iter()
-            })
-            .into_iter(),
+        vec![vec![].into_iter(), vec![].into_iter()].into_iter(),
     ))
 }
