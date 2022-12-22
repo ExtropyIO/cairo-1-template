@@ -38,9 +38,9 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
 )]
 #[test_case(
     "add_one",
-    &[1337].map(BigInt::from) =>
-    RunResultValue::Success(vec![BigInt::from(1338)]);
-    "add_one_2"
+    &[0].map(BigInt::from) =>
+    RunResultValue::Success(vec![BigInt::from(1)]);
+    "add_one_to_zero"
 )]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
