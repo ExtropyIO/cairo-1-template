@@ -8,5 +8,11 @@
 
 ## Testing
 
-* Add unit tests in `tests/test.rs` file. There are two example tests for `src/add_one.cairo` program.
+* Add unit tests in `tests/test.rs` file. There are already tests for example programs.
 * Run with `cargo test --test test`
+
+## Examples
+
+### `power.cairo`
+
+* Introduces recursion and conditional statements.
