@@ -8,7 +8,7 @@
 
 ## Testing
 
-* Add unit tests in `tests/test.rs` file. There are already tests for out programs.
+* Add unit tests in `tests/test.rs` file. There are already tests for example programs.
 * Run with `cargo test --test test`
 
 ## Examples
