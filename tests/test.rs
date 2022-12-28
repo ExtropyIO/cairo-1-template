@@ -57,7 +57,7 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
 #[test_case(
     "power",
     &[10,0].map(BigInt::from) =>
-    RunResultValue::Success(vec![BigInt::from(0)]);
+    RunResultValue::Success(vec![BigInt::from(1)]);
     "power_10_0"
 )]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
