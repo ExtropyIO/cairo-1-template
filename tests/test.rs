@@ -42,6 +42,24 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
     RunResultValue::Success(vec![BigInt::from(1)]);
     "add_one_to_zero"
 )]
+#[test_case(
+    "power",
+    &[2,3].map(BigInt::from) =>
+    RunResultValue::Success(vec![BigInt::from(8)]);
+    "power_2_3"
+)]
+#[test_case(
+    "power",
+    &[0,10].map(BigInt::from) =>
+    RunResultValue::Success(vec![BigInt::from(0)]);
+    "power_0_10"
+)]
+#[test_case(
+    "power",
+    &[10,0].map(BigInt::from) =>
+    RunResultValue::Success(vec![BigInt::from(0)]);
+    "power_10_0"
+)]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
         .expect("Failed setting up runner.");
