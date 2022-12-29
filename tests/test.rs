@@ -66,7 +66,29 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
     RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
     "felt_vs_integer"
 )]
+#[test_case(
+    "felt_vs_integer",
+    &[13,3,13,3].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
+    "felt_vs_integer_13_by_3"
+)]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
+    let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
+        .expect("Failed setting up runner.");
+    let result = runner
+        .run_function(/* find first */ "", params, &None)
+        .expect("Failed running the function.");
+    result.value
+}
+
+#[should_panic]
+#[test_case(
+    "felt_vs_integer",
+    &[13,0,13,0].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
+    "felt_vs_integer_13_by_0"
+)]
+fn run_function_test_panic(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
         .expect("Failed setting up runner.");
     let result = runner
