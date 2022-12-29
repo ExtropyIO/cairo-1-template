@@ -61,16 +61,16 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
     "power_10_0"
 )]
 #[test_case(
-    "felt_vs_integer",
+    "safe_division",
     &[12,3,12,3].map(BigInt::from) =>
     RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
-    "felt_vs_integer"
+    "safe_division_12_by_3"
 )]
 #[test_case(
-    "felt_vs_integer",
+    "safe_division",
     &[13,3,13,3].map(BigInt::from) =>
     RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
-    "felt_vs_integer_13_by_3"
+    "safe_division_13_by_3"
 )]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
@@ -83,10 +83,10 @@ fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
 
 #[should_panic]
 #[test_case(
-    "felt_vs_integer",
+    "safe_division",
     &[13,0,13,0].map(BigInt::from) =>
     RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
-    "felt_vs_integer_13_by_0"
+    "safe_division_13_by_0"
 )]
 fn run_function_test_panic(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
