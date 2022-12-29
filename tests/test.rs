@@ -60,6 +60,12 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
     RunResultValue::Success(vec![BigInt::from(1)]);
     "power_10_0"
 )]
+#[test_case(
+    "felt_vs_integer",
+    &[13].map(BigInt::from) =>
+    RunResultValue::Success([13, 13].map(BigInt::from).into_iter().collect());
+    "felt_vs_integer"
+)]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
         .expect("Failed setting up runner.");
