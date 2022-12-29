@@ -62,8 +62,8 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
 )]
 #[test_case(
     "felt_vs_integer",
-    &[13].map(BigInt::from) =>
-    RunResultValue::Success([13, 13].map(BigInt::from).into_iter().collect());
+    &[12,3].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
     "felt_vs_integer"
 )]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
