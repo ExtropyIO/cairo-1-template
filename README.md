@@ -23,3 +23,4 @@ Introduces:
 Introduces:
 * `u128` unsigned integer 128 data type
 * safe integer division with `felt` and `u128` data types
+* testing for code failing to execute. This is represented by `panic!` macro executed by Cairo's VM Rust implementation.
