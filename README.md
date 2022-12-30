@@ -15,4 +15,11 @@
 
 ### `power.cairo`
 
-* Introduces recursion and conditional statements.
+Introduces:
+* recursion and conditional statements
+
+### `safe_division.cairo`
+
+Introduces:
+* `u128` unsigned integer 128 data type
+* safe integer division with `felt` and `u128` data types
