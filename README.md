@@ -15,4 +15,12 @@
 
 ### `power.cairo`
 
-* Introduces recursion and conditional statements.
+Introduces:
+* recursion and conditional statements
+
+### `safe_division.cairo`
+
+Introduces:
+* `u128` unsigned integer 128 data type
+* safe integer division with `felt` and `u128` data types
+* testing for code failing to execute. This is represented by `panic!` macro executed by Cairo's VM Rust implementation.

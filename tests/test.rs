@@ -60,7 +60,35 @@ fn checked_compile_to_sierra(name: &str) -> sierra::program::Program {
     RunResultValue::Success(vec![BigInt::from(1)]);
     "power_10_0"
 )]
+#[test_case(
+    "safe_division",
+    &[12,3,12,3].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
+    "safe_division_12_by_3"
+)]
+#[test_case(
+    "safe_division",
+    &[13,3,13,3].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
+    "safe_division_13_by_3"
+)]
 fn run_function_test(name: &str, params: &[BigInt]) -> RunResultValue {
+    let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
+        .expect("Failed setting up runner.");
+    let result = runner
+        .run_function(/* find first */ "", params, &None)
+        .expect("Failed running the function.");
+    result.value
+}
+
+#[should_panic]
+#[test_case(
+    "safe_division",
+    &[13,0,13,0].map(BigInt::from) =>
+    RunResultValue::Success([4, 4].map(BigInt::from).into_iter().collect());
+    "safe_division_13_by_0"
+)]
+fn run_function_test_panic(name: &str, params: &[BigInt]) -> RunResultValue {
     let runner = SierraCasmRunner::new(checked_compile_to_sierra(name), false)
         .expect("Failed setting up runner.");
     let result = runner
